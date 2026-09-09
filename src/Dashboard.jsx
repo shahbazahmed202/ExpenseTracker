@@ -1553,6 +1553,38 @@ function ExpenseModal({ headers, initial, onClose, onSave, headerStats, expenses
   };
 
   const MAX_IMAGE_BYTES = 1.5 * 1024 * 1024; // ~1.5MB, keeps localStorage usable
+  const [scanning, setScanning] = useState(false);
+  const [scanProgress, setScanProgress] = useState(0);
+
+  const scanReceipt = async (dataUrl) => {
+    setScanning(true);
+    setScanProgress(0);
+    try {
+      const worker = await createWorker("eng", 1, {
+        logger: (m) => {
+          if (m.status === "recognizing text") setScanProgress(Math.round((m.progress || 0) * 100));
+        },
+      });
+      const { data } = await worker.recognize(dataUrl);
+      await worker.terminate();
+
+      const parsed = parseReceiptText(data.text || "");
+      setForm((f) => ({
+        ...f,
+        vendor: parsed.vendor || f.vendor,
+        amount: parsed.amount !== "" ? parsed.amount : f.amount,
+        date: parsed.date || f.date,
+        description: parsed.description || f.description,
+      }));
+      notify?.("Receipt scanned — fields filled in, please double-check before saving.");
+    } catch (err) {
+      notify?.("Couldn't read the receipt automatically. Please fill the details manually.", "error");
+    } finally {
+      setScanning(false);
+      setScanProgress(0);
+    }
+  };
+
   const onImageChange = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -1565,42 +1597,15 @@ function ExpenseModal({ headers, initial, onClose, onSave, headerStats, expenses
       return;
     }
     const reader = new FileReader();
-    reader.onload = () => setForm((f) => ({ ...f, imageData: reader.result, imageName: file.name }));
+    reader.onload = () => {
+      setForm((f) => ({ ...f, imageData: reader.result, imageName: file.name }));
+      // Scan automatically as soon as the receipt is attached — no extra click needed.
+      scanReceipt(reader.result);
+    };
     reader.readAsDataURL(file);
   };
   const removeImage = () => setForm((f) => ({ ...f, imageData: null, imageName: "" }));
 
-  const [scanning, setScanning] = useState(false);
-  const [scanProgress, setScanProgress] = useState(0);
-  const scanReceipt = async () => {
-    if (!form.imageData) return;
-    setScanning(true);
-    setScanProgress(0);
-    try {
-      const worker = await createWorker("eng", 1, {
-        logger: (m) => {
-          if (m.status === "recognizing text") setScanProgress(Math.round((m.progress || 0) * 100));
-        },
-      });
-      const { data } = await worker.recognize(form.imageData);
-      await worker.terminate();
-
-      const parsed = parseReceiptText(data.text || "");
-      setForm((f) => ({
-        ...f,
-        vendor: parsed.vendor || f.vendor,
-        amount: parsed.amount !== "" ? parsed.amount : f.amount,
-        date: parsed.date || f.date,
-        description: parsed.description || f.description,
-      }));
-      notify?.("Receipt scanned — please double-check the filled fields.");
-    } catch (err) {
-      notify?.("Couldn't scan the receipt. Please fill the details manually.", "error");
-    } finally {
-      setScanning(false);
-      setScanProgress(0);
-    }
-  };
 
   const MAX_DOC_BYTES = 3 * 1024 * 1024; // ~3MB
   const onDocumentChange = (e) => {
@@ -1619,6 +1624,57 @@ function ExpenseModal({ headers, initial, onClose, onSave, headerStats, expenses
   return (
     <Modal title={editingId ? "Edit Expense" : "Add Expense"} onClose={onClose} wide>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4">
+        <div className="sm:col-span-2">
+          {form.imageData ? (
+            <div className="rounded-xl overflow-hidden mb-3" style={{ border: `1px solid ${C.border}` }}>
+              <div className="flex items-center gap-3 px-3 py-2">
+                <img src={form.imageData} alt="Receipt preview" className="w-12 h-12 object-cover rounded-lg" />
+                <span className="text-xs flex-1 truncate" style={{ color: C.muted }}>{form.imageName}</span>
+                <button type="button" onClick={removeImage} className="p-1.5 rounded-lg hover:bg-gray-100">
+                  <X size={14} color={C.muted} />
+                </button>
+              </div>
+              {scanning && (
+                <div
+                  className="flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-semibold"
+                  style={{ background: C.bg, color: C.muted, borderTop: `1px solid ${C.border}` }}
+                >
+                  <span
+                    className="inline-block h-3.5 w-3.5 rounded-full border-2 animate-spin"
+                    style={{ borderColor: `${C.muted} transparent ${C.muted} ${C.muted}` }}
+                  />
+                  Scanning receipt… {scanProgress}% — filling in details automatically
+                </div>
+              )}
+              {!scanning && (
+                <button
+                  type="button"
+                  onClick={() => scanReceipt(form.imageData)}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-semibold"
+                  style={{ background: C.accent, color: C.text, borderTop: `1px solid ${C.border}` }}
+                >
+                  <Search size={13} />
+                  Re-scan Receipt
+                </button>
+              )}
+            </div>
+          ) : (
+            <label
+              htmlFor="receipt-scan-input"
+              className="mb-3 flex flex-col items-center justify-center gap-1.5 rounded-2xl px-4 py-6 cursor-pointer text-center"
+              style={{ border: `1.5px dashed ${C.accent}`, background: C.bg }}
+            >
+              <div className="w-10 h-10 rounded-full flex items-center justify-center" style={{ background: C.accent }}>
+                <Search size={18} color={C.text} />
+              </div>
+              <div className="text-sm font-semibold" style={{ color: C.text }}>Scan a Receipt</div>
+              <div className="text-[11px]" style={{ color: C.muted }}>
+                Snap or upload a photo — vendor, amount and date fill in automatically
+              </div>
+              <input id="receipt-scan-input" type="file" accept="image/*" onChange={onImageChange} className="hidden" />
+            </label>
+          )}
+        </div>
         <Field label="Expense Date"><input type="date" value={form.date} onChange={set("date")} style={inputStyle} /></Field>
         <Field label="Budget Header">
           <select value={form.headerId} onChange={onHeaderChange} style={inputStyle}>
@@ -1684,49 +1740,6 @@ function ExpenseModal({ headers, initial, onClose, onSave, headerStats, expenses
             {ADDED_BY_OPTIONS.map((n) => <option key={n} value={n}>{n}</option>)}
           </select>
         </Field>
-        <div className="sm:col-span-2">
-          <Field label="Attach Image (optional)">
-            {form.imageData ? (
-              <div className="rounded-xl overflow-hidden" style={{ border: `1px solid ${C.border}` }}>
-                <div className="flex items-center gap-3 px-3 py-2">
-                  <img src={form.imageData} alt="Receipt preview" className="w-12 h-12 object-cover rounded-lg" />
-                  <span className="text-xs flex-1 truncate" style={{ color: C.muted }}>{form.imageName}</span>
-                  <button type="button" onClick={removeImage} className="p-1.5 rounded-lg hover:bg-gray-100">
-                    <X size={14} color={C.muted} />
-                  </button>
-                </div>
-                <button
-                  type="button"
-                  onClick={scanReceipt}
-                  disabled={scanning}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-semibold transition-colors"
-                  style={{
-                    background: scanning ? C.bg : C.accent,
-                    color: C.text,
-                    borderTop: `1px solid ${C.border}`,
-                  }}
-                >
-                  {scanning ? (
-                    <>
-                      <span
-                        className="inline-block h-3.5 w-3.5 rounded-full border-2 animate-spin"
-                        style={{ borderColor: `${C.muted} transparent ${C.muted} ${C.muted}` }}
-                      />
-                      Scanning receipt… {scanProgress}%
-                    </>
-                  ) : (
-                    <>
-                      <Search size={13} />
-                      Scan Receipt (auto-fill vendor, amount, date)
-                    </>
-                  )}
-                </button>
-              </div>
-            ) : (
-              <input type="file" accept="image/*" onChange={onImageChange} style={inputStyle} />
-            )}
-          </Field>
-        </div>
         <Field label="Email (optional)"><input type="email" value={form.email} onChange={set("email")} placeholder="name@disrupt.com" style={inputStyle} /></Field>
         <Field label="Attach Document (optional)">
           {form.documentData ? (
