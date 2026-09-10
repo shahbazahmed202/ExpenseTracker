@@ -3,7 +3,7 @@ import {
   LayoutDashboard, Wallet, ReceiptText, FileBarChart2, Download,
   Settings as SettingsIcon, Plus, X, Pencil, Trash2, AlertTriangle,
   CheckCircle2, Search, TrendingUp, TrendingDown, Eye, Menu,
-  ChevronRight, RotateCcw, Info, FileText
+  ChevronRight, RotateCcw, Info, FileText, Building2
 } from "lucide-react";
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Legend, ResponsiveContainer, Tooltip as RTooltip } from "recharts";
 import { createWorker } from "tesseract.js";
@@ -193,6 +193,9 @@ const STORAGE_KEY = "wsbd-app-data-v1";
 // Paste the Apps Script Web App URL here after deploying (ends in /exec).
 // Leave empty and the app just keeps working off local storage, same as before.
 const GOOGLE_SHEETS_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbyLYV1SB2pf9jG26NA2SWSLBHGBseklBB255JLSXe4OBI-S0IjOKhmJfOnqLHkJrv4B/exec";
+// Paste the Apps Script Web App URL for the HISTORY backend here (Code-History.gs,
+// deployed on the existing "Petty cash from Sep 2025 to onwards" sheet).
+const HISTORY_SHEET_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbwxEm6I0sWvU1HkCI8vaQqUqwKOTXUvXVMsdBLq501htcjIQ005STlr5VTQzLvWpNM78w/exec";
 
 /* ---------------------------------- SMALL UI PARTS ---------------------------------- */
 function Badge({ children, tone = "muted" }) {
@@ -335,6 +338,7 @@ export default function Dashboard() {
   const [headers, setHeaders] = useState(SEED_HEADERS);
   const [expenses, setExpenses] = useState(SEED_EXPENSES);
   const [topUps, setTopUps] = useState([]); // { id, mode, date, amount }
+  const [buBudgets, setBuBudgets] = useState(() => Object.fromEntries(BU_OPTIONS.map((b) => [b, 0])));
   const [loaded, setLoaded] = useState(false);
   const [view, setView] = useState("dashboard");
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -346,6 +350,10 @@ export default function Dashboard() {
   const [deleteExpenseId, setDeleteExpenseId] = useState(null);
   const [deleteHeaderId, setDeleteHeaderId] = useState(null);
   const [syncing, setSyncing] = useState(false);
+  const [history, setHistory] = useState([]);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
 
   // Load from persistent storage (browser localStorage)
   useEffect(() => {
@@ -356,6 +364,7 @@ export default function Dashboard() {
         if (parsed.headers?.length) setHeaders(parsed.headers);
         if (parsed.expenses) setExpenses(parsed.expenses);
         if (parsed.topUps) setTopUps(parsed.topUps);
+        if (parsed.buBudgets) setBuBudgets((b) => ({ ...b, ...parsed.buBudgets }));
       }
     } catch (e) {
       // no saved data yet — keep seed data
@@ -368,11 +377,11 @@ export default function Dashboard() {
   useEffect(() => {
     if (!loaded) return;
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ headers, expenses, topUps }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ headers, expenses, topUps, buBudgets }));
     } catch (e) {
       console.error("Storage error", e);
     }
-  }, [headers, expenses, topUps, loaded]);
+  }, [headers, expenses, topUps, buBudgets, loaded]);
 
   const notify = (msg, type = "success") => {
     setToast({ msg, type });
@@ -436,6 +445,33 @@ export default function Dashboard() {
     }
   }
 
+  async function fetchHistory() {
+    if (!HISTORY_SHEET_WEBHOOK_URL) {
+      setHistoryError("History Apps Script URL isn't set up yet.");
+      return;
+    }
+    setHistoryLoading(true);
+    setHistoryError("");
+    try {
+      const res = await fetch(HISTORY_SHEET_WEBHOOK_URL);
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || "Unknown error");
+      setHistory(data.history || []);
+      setHistoryLoaded(true);
+    } catch (err) {
+      setHistoryError("Couldn't load history — check the Apps Script deployment.");
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
+
+  useEffect(() => {
+    if (view === "history" && !historyLoaded && !historyLoading && HISTORY_SHEET_WEBHOOK_URL) {
+      fetchHistory();
+    }
+  }, [view, historyLoaded, historyLoading]);
+
   async function pushTopUpToSheet(topUp) {
     if (!GOOGLE_SHEETS_WEBHOOK_URL) return;
     try {
@@ -470,6 +506,18 @@ export default function Dashboard() {
 
   const overBudgetHeaders = headerStats.filter((h) => h.over);
   const headerNameById = useMemo(() => Object.fromEntries(headers.map((h) => [h.id, h.name])), [headers]);
+
+  const buStats = useMemo(() => {
+    return BU_OPTIONS.map((bu) => {
+      const budget = Number(buBudgets[bu] || 0);
+      const used = expenses.filter((e) => e.bu === bu).reduce((s, e) => s + Number(e.amount || 0), 0);
+      return { bu, budget, used, remaining: budget - used, utilization: pct(used, budget) };
+    });
+  }, [buBudgets, expenses]);
+
+  const setBuBudget = (bu, amount) => {
+    setBuBudgets((b) => ({ ...b, [bu]: Number(amount) || 0 }));
+  };
 
   const paymentModeStats = useMemo(() => {
     return PAYMENT_MODES.map((mode) => {
@@ -564,7 +612,9 @@ export default function Dashboard() {
   const NAV = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
     { id: "headers", label: "Budget Headers", icon: Wallet },
+    { id: "buBudgets", label: "BU Budgets", icon: Building2 },
     { id: "expenses", label: "Expense Entries", icon: ReceiptText },
+    { id: "history", label: "History", icon: RotateCcw },
     { id: "reports", label: "Reports", icon: FileBarChart2 },
     { id: "export", label: "Export Data", icon: Download },
     { id: "settings", label: "Settings", icon: SettingsIcon },
@@ -663,6 +713,9 @@ export default function Dashboard() {
               onDelete={(id) => setDeleteHeaderId(id)}
             />
           )}
+          {view === "buBudgets" && (
+            <BuBudgetsView buStats={buStats} onSetBudget={setBuBudget} />
+          )}
           {view === "expenses" && (
             <ExpensesView
               expenses={expenses}
@@ -671,6 +724,16 @@ export default function Dashboard() {
               onAdd={() => setExpenseModal({})}
               onEdit={(e) => setExpenseModal(e)}
               onDelete={(id) => setDeleteExpenseId(id)}
+            />
+          )}
+          {view === "history" && (
+            <HistoryView
+              history={history}
+              loaded={historyLoaded}
+              loading={historyLoading}
+              error={historyError}
+              onFetch={fetchHistory}
+              configured={!!HISTORY_SHEET_WEBHOOK_URL}
             />
           )}
           {view === "reports" && (
@@ -701,6 +764,7 @@ export default function Dashboard() {
           onSave={saveExpense}
           headerStats={headerStats}
           expenses={expenses}
+          buStats={buStats}
           notify={notify}
         />
       )}
@@ -1179,6 +1243,62 @@ function HeadersView({ headerStats, expenses, onAdd, onEdit, onDelete }) {
   );
 }
 
+/* ---------------------------------- BU BUDGETS VIEW ---------------------------------- */
+function BuBudgetsView({ buStats, onSetBudget }) {
+  return (
+    <div className="space-y-5">
+      <p className="text-sm" style={{ color: C.muted }}>
+        Set an allocated budget for each Business Unit. This is for visibility only — it shows how much each BU
+        has spent against its own budget, but does <span className="font-semibold">not</span> reduce the
+        Budget Header/Segment totals above. Only <span className="font-semibold">Soft FM</span> is flagged when it
+        goes over its allocated amount.
+      </p>
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+        {buStats.map((b) => {
+          const enforced = b.bu === "Soft FM";
+          const over = enforced && b.budget > 0 && b.used > b.budget;
+          return (
+            <div
+              key={b.bu}
+              className="rounded-2xl p-5 shadow-sm"
+              style={{ background: C.card, border: `1px solid ${over ? "#F3C7C3" : C.border}` }}
+            >
+              <div className="flex items-center justify-between mb-3">
+                <h4 className="text-sm font-semibold truncate" style={{ color: C.text }}>{b.bu}</h4>
+                {enforced && <Badge tone={over ? "red" : "green"}>{over ? "Over Budget" : "Tracked"}</Badge>}
+              </div>
+              <div className="flex items-center justify-between text-xs mb-1.5" style={{ color: C.muted }}>
+                <span>Allocated Budget (PKR)</span>
+              </div>
+              <input
+                type="number"
+                min="0"
+                value={b.budget || ""}
+                onChange={(e) => onSetBudget(b.bu, e.target.value)}
+                placeholder="0"
+                className="w-full rounded-xl px-3 py-2 text-sm font-semibold mb-3"
+                style={{ border: `1px solid ${C.border}`, color: C.text, background: "#fff" }}
+              />
+              <div className="flex items-center justify-between text-sm">
+                <span style={{ color: C.muted }}>Spent</span>
+                <span className="font-bold tabular-nums" style={{ color: over ? C.red : C.text }}>{fmtPKR(b.used)}</span>
+              </div>
+              <div className="mt-1 flex items-center justify-between text-xs" style={{ color: C.muted }}>
+                <span>{fmtPKR(b.budget)} / {fmtPKR(b.used)}</span>
+                {over && (
+                  <span className="font-semibold" style={{ color: C.red }}>
+                    Over by {fmtPKR(Math.abs(b.remaining))}
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 /* ---------------------------------- EXPENSES VIEW ---------------------------------- */
 function ExpensesView({ expenses, headers, headerNameById, onAdd, onEdit, onDelete }) {
   const [search, setSearch] = useState("");
@@ -1217,6 +1337,160 @@ function ExpensesView({ expenses, headers, headerNameById, onAdd, onEdit, onDele
         <ExpenseTable rows={filtered} headerNameById={headerNameById} onEdit={onEdit} onDelete={onDelete} />
       </div>
       <p className="text-xs" style={{ color: C.muted }}>{filtered.length} of {expenses.length} entries shown</p>
+    </div>
+  );
+}
+
+/* ---------------------------------- HISTORY VIEW ---------------------------------- */
+function HistoryView({ history, loaded, loading, error, onFetch, configured }) {
+  const [search, setSearch] = useState("");
+  const [sourceFilter, setSourceFilter] = useState("all");
+  const [buFilter, setBuFilter] = useState("all");
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 50;
+
+  const sources = useMemo(() => [...new Set(history.map((h) => h.source))], [history]);
+  const bus = useMemo(() => [...new Set(history.map((h) => h.bu).filter(Boolean))].sort(), [history]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return history.filter((h) => {
+      if (sourceFilter !== "all" && h.source !== sourceFilter) return false;
+      if (buFilter !== "all" && h.bu !== buFilter) return false;
+      if (q && !`${h.description} ${h.bu} ${h.vendor}`.toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }, [history, search, sourceFilter, buFilter]);
+
+  const totalAmount = filtered.reduce((s, h) => s + Number(h.amount || 0), 0);
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const pageRows = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
+  if (!configured) {
+    return (
+      <div className="rounded-2xl p-8 text-center" style={{ background: C.card, border: `1px solid ${C.border}` }}>
+        <Info size={22} color={C.muted} className="mx-auto mb-2" />
+        <p className="text-sm" style={{ color: C.muted }}>
+          History Apps Script URL isn't set up yet — add it to <code>HISTORY_SHEET_WEBHOOK_URL</code> in the code.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2 justify-between">
+        <p className="text-sm" style={{ color: C.muted }}>
+          Read-only archive pulled from the old petty cash Google Sheet (Sep 2025 onwards + JS credit card log).
+        </p>
+        <button
+          onClick={onFetch}
+          disabled={loading}
+          className="flex items-center gap-1.5 rounded-xl px-4 py-2 text-sm font-semibold shrink-0"
+          style={{ background: C.accent, color: C.text, opacity: loading ? 0.6 : 1 }}
+        >
+          <RotateCcw size={15} className={loading ? "animate-spin" : ""} /> {loading ? "Loading…" : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="flex items-center gap-1.5 text-xs font-medium rounded-lg px-3 py-2" style={{ background: C.redLight, color: C.red }}>
+          <AlertTriangle size={13} /> {error}
+        </div>
+      )}
+
+      {loaded && (
+        <>
+          <div className="flex flex-wrap gap-2">
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+              placeholder="Search description, BU or vendor…"
+              className="flex-1 min-w-[200px] rounded-xl px-3 py-2 text-sm"
+              style={{ border: `1px solid ${C.border}` }}
+            />
+            <select
+              value={sourceFilter}
+              onChange={(e) => { setSourceFilter(e.target.value); setPage(1); }}
+              className="rounded-xl px-3 py-2 text-sm"
+              style={{ border: `1px solid ${C.border}` }}
+            >
+              <option value="all">All sources</option>
+              {sources.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <select
+              value={buFilter}
+              onChange={(e) => { setBuFilter(e.target.value); setPage(1); }}
+              className="rounded-xl px-3 py-2 text-sm"
+              style={{ border: `1px solid ${C.border}` }}
+            >
+              <option value="all">All BUs</option>
+              {bus.map((b) => <option key={b} value={b}>{b}</option>)}
+            </select>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            <KPICard label="Total Entries" value={String(filtered.length)} icon={ReceiptText} tone="blue" />
+            <KPICard label="Total Amount" value={fmtPKR(totalAmount)} icon={Wallet} tone="purple" />
+            <KPICard label="Sources" value={String(sources.length)} icon={FileBarChart2} tone="green" />
+          </div>
+
+          <div className="rounded-2xl shadow-sm overflow-hidden" style={{ background: C.card, border: `1px solid ${C.border}` }}>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr style={{ background: C.bg }}>
+                    <th className="text-left px-4 py-2.5 font-semibold" style={{ color: C.muted }}>Date</th>
+                    <th className="text-left px-4 py-2.5 font-semibold" style={{ color: C.muted }}>BU</th>
+                    <th className="text-left px-4 py-2.5 font-semibold" style={{ color: C.muted }}>Vendor</th>
+                    <th className="text-left px-4 py-2.5 font-semibold" style={{ color: C.muted }}>Description</th>
+                    <th className="text-right px-4 py-2.5 font-semibold" style={{ color: C.muted }}>Amount</th>
+                    <th className="text-left px-4 py-2.5 font-semibold" style={{ color: C.muted }}>Source</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y" style={{ borderColor: C.border }}>
+                  {pageRows.map((h, i) => (
+                    <tr key={i}>
+                      <td className="px-4 py-2.5 whitespace-nowrap" style={{ color: C.text }}>{h.date ? fmtDate(h.date) : "—"}</td>
+                      <td className="px-4 py-2.5 whitespace-nowrap" style={{ color: C.text }}>{h.bu || "—"}</td>
+                      <td className="px-4 py-2.5 whitespace-nowrap" style={{ color: C.muted }}>{h.vendor || "—"}</td>
+                      <td className="px-4 py-2.5 max-w-md" style={{ color: C.text }}>{h.description}</td>
+                      <td className="px-4 py-2.5 text-right font-semibold whitespace-nowrap" style={{ color: C.text }}>{fmtPKR(h.amount)}</td>
+                      <td className="px-4 py-2.5 whitespace-nowrap"><Badge tone="muted">{h.source}</Badge></td>
+                    </tr>
+                  ))}
+                  {pageRows.length === 0 && (
+                    <tr><td colSpan={6} className="text-center py-10 text-sm" style={{ color: C.muted }}>No matching entries.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {totalPages > 1 && (
+            <div className="flex items-center justify-between text-sm">
+              <button
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={page === 1}
+                className="px-3 py-1.5 rounded-lg"
+                style={{ border: `1px solid ${C.border}`, opacity: page === 1 ? 0.5 : 1 }}
+              >
+                Previous
+              </button>
+              <span style={{ color: C.muted }}>Page {page} of {totalPages}</span>
+              <button
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                disabled={page === totalPages}
+                className="px-3 py-1.5 rounded-lg"
+                style={{ border: `1px solid ${C.border}`, opacity: page === totalPages ? 0.5 : 1 }}
+              >
+                Next
+              </button>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -1511,7 +1785,7 @@ function SettingsView({ onClear, headerCount, expenseCount, onPull, syncing, she
 }
 
 /* ---------------------------------- EXPENSE MODAL ---------------------------------- */
-function ExpenseModal({ headers, initial, onClose, onSave, headerStats, expenses, notify }) {
+function ExpenseModal({ headers, initial, onClose, onSave, headerStats, expenses, buStats, notify }) {
   const editingId = initial?.id || null;
   const initialHeaderId = initial?.headerId || (headers[0]?.id || "");
   const initialHeaderName = headers.find((h) => h.id === initialHeaderId)?.name || "";
@@ -1735,6 +2009,21 @@ function ExpenseModal({ headers, initial, onClose, onSave, headerStats, expenses
             {BU_OPTIONS.map((b) => <option key={b} value={b}>{b}</option>)}
           </select>
         </Field>
+        {(() => {
+          const selectedBu = (buStats || []).find((b) => b.bu === form.bu);
+          if (!selectedBu) return null;
+          const isSoftFm = form.bu === "Soft FM";
+          const willBeOver = isSoftFm && selectedBu.budget > 0 && (selectedBu.used + Number(form.amount || 0)) > selectedBu.budget;
+          return (
+            <div className="sm:col-span-2 -mt-1 mb-1 flex items-center justify-between rounded-xl px-4 py-2.5 text-xs" style={{ background: willBeOver ? C.redLight : C.bg, border: `1px solid ${C.border}` }}>
+              <span style={{ color: C.muted }}>{form.bu} budget</span>
+              <span className="font-semibold tabular-nums" style={{ color: willBeOver ? C.red : C.text }}>
+                {fmtPKR(selectedBu.budget)} / {fmtPKR(selectedBu.used)}
+                {willBeOver && " — over budget"}
+              </span>
+            </div>
+          );
+        })()}
         <Field label="Added By">
           <select value={form.addedBy} onChange={set("addedBy")} style={inputStyle}>
             {ADDED_BY_OPTIONS.map((n) => <option key={n} value={n}>{n}</option>)}
