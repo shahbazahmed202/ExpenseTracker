@@ -249,7 +249,18 @@ function getSegmentBreakdown(headerName, headerId, expenses) {
 
 // Mode of Payment options (matches the "Credit card useage" / "Petty Cash Usage" tabs on the sheet)
 const PAYMENT_MODES = ["Credit Card", "Petty Cash"];
-const PAYMENT_MODE_LIMIT = 150000; // shared limit for both Credit Card and Petty Cash
+const PAYMENT_MODE_LIMIT = 150000; // Credit Card only — Petty Cash is now tracked as a real cash-in-hand balance below.
+
+// Petty Cash is physical cash, not a spending cap — it works like a float. Rather than
+// re-summing every historical inflow/outflow ourselves (error-prone — the source ledger has
+// a couple of rows with a missing date that our own parser silently dropped), we anchor on
+// the ledger's own bottom-line total row: Total Debit (Rs 2,710,199) − Total Credit
+// (Rs 2,639,372) = Rs 70,827 cash in hand, as of the last recorded transaction (Sep 8, 2026).
+// Anything added through the app AFTER that point (new "Petty Cash" expenses/top-ups, i.e.
+// not part of the 642 historical entries imported with id prefix "hist_") moves the balance
+// from there.
+const PETTY_CASH_BASELINE_BALANCE = 70827;
+const PETTY_CASH_BASELINE_DATE = "2026-09-08";
 
 // Added By options
 const ADDED_BY_OPTIONS = ["Shahbaz Ahmed", "Ahsan Hussain", "Ali Turab", "Khaleeq Kamali", "Finance"];
@@ -311,11 +322,18 @@ const SOFT_FM_HISTORY_CATS = new Set([
 ]);
 function historicalFMUsed(catSet) {
   return STATIC_HISTORY
-    .filter((h) => h.type === "expense" && catSet.has(h.category))
+    .filter((h) => h.type === "expense" && catSet.has(h.category) && h.date < "2026-08-05")
     .reduce((s, h) => s + Number(h.amount || 0), 0);
 }
-const HARD_FM_HISTORICAL_USED = historicalFMUsed(HARD_FM_HISTORY_CATS);
-const SOFT_FM_HISTORICAL_USED = historicalFMUsed(SOFT_FM_HISTORY_CATS);
+// From Aug 5, 2026 onward the source sheet started explicitly tagging each entry as
+// "Hard FM" or "Soft FM" directly (rather than us guessing it from the GL category —
+// the same category, e.g. "General Maintenance", can be either depending on the actual
+// nature of the purchase). These two numbers are exact sums from that explicit tagging
+// for Aug 5 – Sep 8, 2026; everything before that date still uses the category heuristic.
+const HARD_FM_EXPLICIT_TAGGED_AUG_SEP = 167915;
+const SOFT_FM_EXPLICIT_TAGGED_AUG_SEP = 113981;
+const HARD_FM_HISTORICAL_USED = historicalFMUsed(HARD_FM_HISTORY_CATS) + HARD_FM_EXPLICIT_TAGGED_AUG_SEP;
+const SOFT_FM_HISTORICAL_USED = historicalFMUsed(SOFT_FM_HISTORY_CATS) + SOFT_FM_EXPLICIT_TAGGED_AUG_SEP;
 // H1 2026 budget figures from Admin_Budget_vs_Actual.xlsx (editable later in BU Budgets).
 const HARD_FM_DEFAULT_BUDGET = 3168214.4675;
 const SOFT_FM_DEFAULT_BUDGET = 6517151.005 + 2775518.34625 + 1265612.8265;
@@ -685,11 +703,24 @@ function DashboardApp({ authedUser, authRole, onLogout }) {
 
   const paymentModeStats = useMemo(() => {
     return PAYMENT_MODES.map((mode) => {
-      const used = expenses.filter((e) => e.mode === mode).reduce((s, e) => s + Number(e.amount), 0);
       const toppedUp = topUps.filter((t) => t.mode === mode).reduce((s, t) => s + Number(t.amount), 0);
+      const liveUsed = expenses.filter((e) => e.mode === mode).reduce((s, e) => s + Number(e.amount), 0);
+
+      if (mode === "Petty Cash") {
+        // Cash-in-hand model, anchored on the ledger's own baseline balance (see constant
+        // above). Only expenses added AFTER that snapshot (not the imported "hist_" ones,
+        // which are already reflected in the baseline) move the balance from here.
+        const newUsed = expenses
+          .filter((e) => e.mode === mode && !String(e.id).startsWith("hist_"))
+          .reduce((s, e) => s + Number(e.amount || 0), 0);
+        const opening = PETTY_CASH_BASELINE_BALANCE + toppedUp;
+        const remaining = opening - newUsed;
+        return { mode, limit: opening, used: newUsed, remaining, toppedUp, utilization: pct(newUsed, opening), over: remaining < 0, isBalance: true };
+      }
+
       const limit = PAYMENT_MODE_LIMIT + toppedUp;
-      const remaining = limit - used;
-      return { mode, limit, used, remaining, toppedUp, utilization: pct(used, limit), over: used > limit };
+      const remaining = limit - liveUsed;
+      return { mode, limit, used: liveUsed, remaining, toppedUp, utilization: pct(liveUsed, limit), over: liveUsed > limit, isBalance: false };
     });
   }, [expenses, topUps]);
 
@@ -1036,7 +1067,7 @@ function DashboardView({ totals, headerStats, overBudgetHeaders, expenses, heade
 
       {paymentModeStats && (
         <div>
-          <h3 className="text-sm font-semibold mb-3" style={{ color: C.text }}>Payment Mode Limits</h3>
+          <h3 className="text-sm font-semibold mb-3" style={{ color: C.text }}>Payment Modes</h3>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {paymentModeStats.map((p) => (
               <button
@@ -1049,12 +1080,12 @@ function DashboardView({ totals, headerStats, overBudgetHeaders, expenses, heade
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-1">
                     <span className="text-sm font-semibold" style={{ color: C.text }}>{p.mode}</span>
-                    {p.over && <Badge tone="red">Over Limit</Badge>}
+                    {p.over && <Badge tone="red">{p.isBalance ? "Cash Short" : "Over Limit"}</Badge>}
                   </div>
                   <div className="space-y-1 text-xs">
-                    <div className="flex justify-between"><span style={{ color: C.muted }}>Limit</span><span className="font-semibold" style={{ color: C.text }}>{fmtPKR(p.limit)}</span></div>
-                    <div className="flex justify-between"><span style={{ color: C.muted }}>Used</span><span className="font-semibold" style={{ color: C.text }}>{fmtPKR(p.used)}</span></div>
-                    <div className="flex justify-between"><span style={{ color: C.muted }}>Remaining</span><span className="font-semibold" style={{ color: p.remaining < 0 ? C.red : C.green }}>{fmtPKR(p.remaining)}</span></div>
+                    <div className="flex justify-between"><span style={{ color: C.muted }}>{p.isBalance ? "Opening Balance" : "Limit"}</span><span className="font-semibold" style={{ color: C.text }}>{fmtPKR(p.limit)}</span></div>
+                    <div className="flex justify-between"><span style={{ color: C.muted }}>Spent</span><span className="font-semibold" style={{ color: C.text }}>{fmtPKR(p.used)}</span></div>
+                    <div className="flex justify-between"><span style={{ color: C.muted }}>{p.isBalance ? "Available Balance" : "Remaining"}</span><span className="font-semibold" style={{ color: p.remaining < 0 ? C.red : C.green }}>{fmtPKR(p.remaining)}</span></div>
                   </div>
                   <div className="mt-2 text-xs font-semibold flex items-center gap-1" style={{ color: C.green }}>
                     View details <ChevronRight size={13} />
@@ -1415,16 +1446,16 @@ function PaymentModeModal({ mode, stats, expenses, headerNameById, onClose, onTo
   };
 
   return (
-    <Modal title={`${mode} — Limit Overview`} onClose={onClose} wide>
+    <Modal title={stats.isBalance ? `${mode} — Cash Balance` : `${mode} — Limit Overview`} onClose={onClose} wide>
       <div className="flex items-center gap-6 mb-5 flex-wrap">
         <Gauge percent={stats.utilization} size={120} stroke={11} over={stats.over} />
         <div className="flex-1 min-w-[180px] space-y-2 text-sm">
-          <div className="flex justify-between"><span style={{ color: C.muted }}>Limit</span><span className="font-semibold" style={{ color: C.text }}>{fmtPKR(stats.limit)}</span></div>
+          <div className="flex justify-between"><span style={{ color: C.muted }}>{stats.isBalance ? "Opening Balance" : "Limit"}</span><span className="font-semibold" style={{ color: C.text }}>{fmtPKR(stats.limit)}</span></div>
           {stats.toppedUp > 0 && (
             <div className="flex justify-between"><span style={{ color: C.muted }}>Topped Up</span><span className="font-semibold" style={{ color: C.green }}>+{fmtPKR(stats.toppedUp)}</span></div>
           )}
-          <div className="flex justify-between"><span style={{ color: C.muted }}>Used</span><span className="font-semibold" style={{ color: C.text }}>{fmtPKR(stats.used)}</span></div>
-          <div className="flex justify-between"><span style={{ color: C.muted }}>Remaining</span><span className="font-semibold" style={{ color: stats.remaining < 0 ? C.red : C.green }}>{fmtPKR(stats.remaining)}</span></div>
+          <div className="flex justify-between"><span style={{ color: C.muted }}>Spent</span><span className="font-semibold" style={{ color: C.text }}>{fmtPKR(stats.used)}</span></div>
+          <div className="flex justify-between"><span style={{ color: C.muted }}>{stats.isBalance ? "Available Balance" : "Remaining"}</span><span className="font-semibold" style={{ color: stats.remaining < 0 ? C.red : C.green }}>{fmtPKR(stats.remaining)}</span></div>
           <div className="flex justify-between"><span style={{ color: C.muted }}>Entries</span><span className="font-semibold" style={{ color: C.text }}>{expenses.length}</span></div>
         </div>
       </div>
@@ -1432,7 +1463,11 @@ function PaymentModeModal({ mode, stats, expenses, headerNameById, onClose, onTo
         <div className="flex items-start gap-2 rounded-xl px-4 py-3 mb-4" style={{ background: C.redLight }}>
           <AlertTriangle size={16} color={C.red} className="shrink-0 mt-0.5" />
           <div className="text-xs" style={{ color: "#7A241E" }}>
-            <span className="font-semibold">{mode} is over its {fmtPKR(stats.limit)} limit</span> by {fmtPKR(Math.abs(stats.remaining))}.
+            {stats.isBalance ? (
+              <span className="font-semibold">{mode} balance is short by {fmtPKR(Math.abs(stats.remaining))}.</span>
+            ) : (
+              <><span className="font-semibold">{mode} is over its {fmtPKR(stats.limit)} limit</span> by {fmtPKR(Math.abs(stats.remaining))}.</>
+            )}
           </div>
         </div>
       )}
