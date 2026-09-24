@@ -15,7 +15,7 @@ A Vite + React app, ready to deploy on Vercel.
 4. Vercel will auto-detect this as a **Vite** project. Leave all settings as default.
 5. Click **Deploy**. In about a minute you'll get a live public URL like:
    `https://workplace-budget-dashboard.vercel.app`
-6. Open that URL — the dashboard loads with your real Budget Headers and no sample expenses. Add a real expense to confirm it saves (refresh the page — it should still be there).
+6. Open that URL — the dashboard loads with the same sample data as in chat. Add a real expense to confirm it saves (refresh the page — it should still be there).
 
 ## Updating it later
 Any time you (or I) change the code, push the change to the same GitHub repo — Vercel automatically redeploys within a minute or two. No manual redeploy step needed.
